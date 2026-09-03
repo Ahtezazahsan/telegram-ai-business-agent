@@ -1,45 +1,13 @@
+import logging
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models import Customer, Message
 
-
-def get_or_create_customer(
-    session: Session,
-    sender: dict[str, Any],
-    chat_id: int,
-) -> Customer:
-    telegram_user_id = sender["id"]
-
-    customer = session.scalar(
-        select(Customer).where(
-            Customer.telegram_user_id == telegram_user_id
-        )
-    )
-
-    if customer is None:
-        customer = Customer(
-            telegram_user_id=telegram_user_id,
-            telegram_chat_id=chat_id,
-            username=sender.get("username"),
-            first_name=sender.get("first_name"),
-            last_name=sender.get("last_name"),
-            language_code=sender.get("language_code"),
-        )
-        session.add(customer)
-        session.flush()
-    else:
-        customer.telegram_chat_id = chat_id
-        customer.username = sender.get("username")
-        customer.first_name = sender.get("first_name")
-        customer.last_name = sender.get("last_name")
-        customer.language_code = sender.get("language_code")
-
-    return customer
+logger = logging.getLogger("database")
 
 
 def save_incoming_message(
@@ -50,20 +18,42 @@ def save_incoming_message(
     text: str,
 ) -> bool:
     with SessionLocal() as session:
-        existing_message = session.scalar(
-            select(Message).where(
+        existing_id = session.scalar(
+            select(Message.id).where(
                 Message.telegram_update_id == update_id
             )
         )
 
-        if existing_message is not None:
+        if existing_id is not None:
+            logger.info(
+                "Duplicate database message | update_id=%s",
+                update_id,
+            )
             return False
 
-        customer = get_or_create_customer(
-            session=session,
-            sender=sender,
-            chat_id=chat_id,
+        customer = session.scalar(
+            select(Customer).where(
+                Customer.telegram_user_id == sender["id"]
+            )
         )
+
+        if customer is None:
+            customer = Customer(
+                telegram_user_id=sender["id"],
+                telegram_chat_id=chat_id,
+                username=sender.get("username"),
+                first_name=sender.get("first_name"),
+                last_name=sender.get("last_name"),
+                language_code=sender.get("language_code"),
+            )
+            session.add(customer)
+            session.flush()
+        else:
+            customer.telegram_chat_id = chat_id
+            customer.username = sender.get("username")
+            customer.first_name = sender.get("first_name")
+            customer.last_name = sender.get("last_name")
+            customer.language_code = sender.get("language_code")
 
         incoming_message = Message(
             customer_id=customer.id,
@@ -79,8 +69,28 @@ def save_incoming_message(
 
         try:
             session.commit()
+
+            customer_count = session.scalar(
+                select(func.count(Customer.id))
+            )
+            message_count = session.scalar(
+                select(func.count(Message.id))
+            )
+
+            logger.info(
+                "Incoming DB commit verified | customer_id=%s | "
+                "customers=%s | messages=%s",
+                customer.id,
+                customer_count,
+                message_count,
+            )
+
         except IntegrityError:
             session.rollback()
+            logger.exception(
+                "Incoming database integrity error | update_id=%s",
+                update_id,
+            )
             return False
 
     return True
@@ -99,7 +109,9 @@ def save_outgoing_message(
         )
 
         if customer is None:
-            raise ValueError("Customer does not exist")
+            raise ValueError(
+                f"Customer not found for chat_id={chat_id}"
+            )
 
         outgoing_message = Message(
             customer_id=customer.id,
@@ -113,3 +125,14 @@ def save_outgoing_message(
 
         session.add(outgoing_message)
         session.commit()
+
+        message_count = session.scalar(
+            select(func.count(Message.id))
+        )
+
+        logger.info(
+            "Outgoing DB commit verified | customer_id=%s | "
+            "messages=%s",
+            customer.id,
+            message_count,
+        )
