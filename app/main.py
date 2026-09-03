@@ -22,6 +22,8 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(APP_NAME)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 app = FastAPI(
     title=APP_NAME,
