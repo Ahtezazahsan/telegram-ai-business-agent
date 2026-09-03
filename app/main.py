@@ -82,7 +82,59 @@ async def health_check() -> dict[str, str]:
         "status": "healthy",
     }
 
+@app.post("/admin/telegram/setup-webhook")
+async def setup_telegram_webhook(
+    payload: dict[str, str],
+    x_admin_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    if x_admin_key != TELEGRAM_WEBHOOK_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin key",
+        )
 
+    webhook_url = payload.get("webhook_url", "")
+
+    if not webhook_url.startswith("https://"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A valid HTTPS webhook URL is required",
+        )
+
+    telegram_url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/setWebhook"
+    )
+
+    telegram_payload = {
+        "url": webhook_url,
+        "secret_token": TELEGRAM_WEBHOOK_SECRET,
+        "allowed_updates": ["message"],
+        "drop_pending_updates": True,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                telegram_url,
+                json=telegram_payload,
+            )
+            response.raise_for_status()
+
+        result = response.json()
+        logger.info(
+            "Telegram webhook configured | url=%s",
+            webhook_url,
+        )
+        return result
+
+    except httpx.HTTPError:
+        logger.exception("Telegram webhook setup failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Telegram webhook setup failed",
+        )
+    
 @app.post("/webhooks/telegram")
 async def telegram_webhook(
     update: dict[str, Any],
