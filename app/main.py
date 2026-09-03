@@ -7,8 +7,13 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, status
 
 from app import models  # noqa: F401
-from app.database import Base, engine
+from sqlalchemy import func, select, text
 
+from app.database import Base, SessionLocal, engine
+from app.repositories import (
+    save_incoming_message,
+    save_outgoing_message,
+)
 
 load_dotenv()
 
@@ -36,14 +41,16 @@ app = FastAPI(
 )
 
 
-async def send_telegram_message(chat_id: int, text: str) -> None:
+async def send_telegram_message(
+    chat_id: int,
+    text: str,
+) -> dict[str, Any]:
     if not TELEGRAM_SEND_ENABLED:
         logger.info(
-            "Telegram sending disabled locally | chat_id=%s | reply=%s",
+            "Telegram sending disabled locally | chat_id=%s",
             chat_id,
-            text,
         )
-        return
+        return {}
 
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
@@ -62,8 +69,10 @@ async def send_telegram_message(chat_id: int, text: str) -> None:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
+            result = response.json()
 
         logger.info("Telegram reply sent | chat_id=%s", chat_id)
+        return result.get("result", {})
 
     except httpx.HTTPError:
         logger.exception(
@@ -88,6 +97,38 @@ async def health_check() -> dict[str, str]:
         "status": "healthy",
     }
 
+
+@app.get("/admin/database/stats")
+def database_stats(
+    x_admin_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    if x_admin_key != TELEGRAM_WEBHOOK_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin key",
+        )
+
+    with SessionLocal() as session:
+        database_info = session.execute(
+            text(
+                "SELECT current_database(), current_schema()"
+            )
+        ).one()
+
+        customer_count = session.scalar(
+            select(func.count(models.Customer.id))
+        )
+
+        message_count = session.scalar(
+            select(func.count(models.Message.id))
+        )
+
+    return {
+        "database": database_info[0],
+        "schema": database_info[1],
+        "customers": customer_count or 0,
+        "messages": message_count or 0,
+    }
 @app.post("/admin/database/init")
 def initialize_database(
     x_admin_key: str | None = Header(default=None),
@@ -209,6 +250,30 @@ async def telegram_webhook(
         logger.info("Non-text Telegram message ignored")
         return {"status": "ignored"}
 
+
+    update_id = update.get("update_id")
+
+    if update_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Telegram update ID is missing",
+        )
+
+    is_new_message = save_incoming_message(
+        update_id=update_id,
+        message=message,
+        sender=sender,
+        chat_id=chat_id,
+        text=text,
+    )
+
+    if not is_new_message:
+        logger.info(
+            "Duplicate Telegram update ignored | update_id=%s",
+            update_id,
+        )
+        return {"status": "duplicate"}    
+
     logger.info(
         "Incoming Telegram message | update_id=%s | "
         "chat_id=%s | user_id=%s | username=%s | text=%s",
@@ -225,7 +290,13 @@ async def telegram_webhook(
     )
 
     try:
-        await send_telegram_message(chat_id, reply)
+        sent_message = await send_telegram_message(chat_id, reply)
+
+        save_outgoing_message(
+            chat_id=chat_id,
+            text=reply,
+            telegram_message_id=sent_message.get("message_id"),
+        )
     except httpx.HTTPError:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
