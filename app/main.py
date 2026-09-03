@@ -6,6 +6,10 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, status
 
+from app import models  # noqa: F401
+from app.database import Base, engine
+
+
 load_dotenv()
 
 APP_NAME = os.getenv("APP_NAME", "Telegram AI Business Agent")
@@ -83,6 +87,32 @@ async def health_check() -> dict[str, str]:
     return {
         "status": "healthy",
     }
+
+@app.post("/admin/database/init")
+def initialize_database(
+    x_admin_key: str | None = Header(default=None),
+) -> dict[str, str]:
+    if x_admin_key != TELEGRAM_WEBHOOK_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin key",
+        )
+
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("PostgreSQL tables initialized")
+
+        return {
+            "status": "initialized",
+            "database": "postgresql",
+        }
+
+    except Exception:
+        logger.exception("PostgreSQL initialization failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database initialization failed",
+        )
 
 @app.post("/admin/telegram/setup-webhook")
 async def setup_telegram_webhook(
