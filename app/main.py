@@ -102,8 +102,13 @@ async def send_telegram_message(
     }
 
     try:
+        timeout_config = httpx.Timeout(
+        timeout=60.0,
+        connect=10.0,
+        )
+
         async with httpx.AsyncClient(
-            timeout=15.0
+            timeout=timeout_config
         ) as client:
             response = await client.post(
                 telegram_url,
