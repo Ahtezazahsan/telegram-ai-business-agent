@@ -10,6 +10,7 @@ from sqlalchemy import func, select, text
 from app import models  # noqa: F401
 from app.database import Base, SessionLocal, engine
 from app.repositories import (
+    get_recent_conversation,
     save_incoming_message,
     save_outgoing_message,
 )
@@ -20,7 +21,10 @@ APP_NAME = os.getenv(
     "APP_NAME",
     "Telegram AI Business Agent",
 )
-APP_ENV = os.getenv("APP_ENV", "development")
+APP_ENV = os.getenv(
+    "APP_ENV",
+    "development",
+)
 
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN",
@@ -31,7 +35,10 @@ TELEGRAM_WEBHOOK_SECRET = os.getenv(
     "",
 )
 TELEGRAM_SEND_ENABLED = (
-    os.getenv("TELEGRAM_SEND_ENABLED", "false").lower()
+    os.getenv(
+        "TELEGRAM_SEND_ENABLED",
+        "false",
+    ).lower()
     == "true"
 )
 
@@ -54,7 +61,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(APP_NAME)
 
-# Prevent tokens and sensitive request URLs appearing in logs.
+# Prevent sensitive URLs and tokens appearing in logs.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
@@ -70,7 +77,7 @@ app = FastAPI(
 
 async def send_telegram_message(
     chat_id: int,
-    text: str,
+    message_text: str,
 ) -> dict[str, Any]:
     if not TELEGRAM_SEND_ENABLED:
         logger.info(
@@ -84,14 +91,14 @@ async def send_telegram_message(
             "TELEGRAM_BOT_TOKEN is not configured"
         )
 
-    url = (
+    telegram_url = (
         "https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
     payload = {
         "chat_id": chat_id,
-        "text": text,
+        "text": message_text,
     }
 
     try:
@@ -99,7 +106,7 @@ async def send_telegram_message(
             timeout=15.0
         ) as client:
             response = await client.post(
-                url,
+                telegram_url,
                 json=payload,
             )
             response.raise_for_status()
@@ -123,7 +130,8 @@ async def send_telegram_message(
 async def call_n8n_orchestrator(
     chat_id: int,
     sender: dict[str, Any],
-    text: str,
+    message_text: str,
+    conversation_history: list[dict[str, str]],
 ) -> dict[str, Any]:
     if not N8N_ORCHESTRATION_URL:
         raise RuntimeError(
@@ -140,32 +148,43 @@ async def call_n8n_orchestrator(
         "chat_id": chat_id,
         "username": sender.get("username"),
         "first_name": sender.get("first_name"),
-        "message": text,
+        "message": message_text,
+        "conversation_history": conversation_history,
     }
 
     headers = {
         "X-Internal-API-Key": N8N_INTERNAL_API_KEY,
     }
 
-    async with httpx.AsyncClient(
-        timeout=30.0
-    ) as client:
-        response = await client.post(
-            N8N_ORCHESTRATION_URL,
-            json=payload,
-            headers=headers,
+    try:
+        async with httpx.AsyncClient(
+            timeout=30.0
+        ) as client:
+            response = await client.post(
+                N8N_ORCHESTRATION_URL,
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+            result = response.json()
+
+        logger.info(
+            "n8n orchestration completed | "
+            "chat_id=%s | intent=%s | "
+            "history_messages=%s",
+            chat_id,
+            result.get("intent"),
+            len(conversation_history),
         )
-        response.raise_for_status()
-        result = response.json()
 
-    logger.info(
-        "n8n orchestration completed | "
-        "chat_id=%s | intent=%s",
-        chat_id,
-        result.get("intent"),
-    )
+        return result
 
-    return result
+    except httpx.HTTPError:
+        logger.exception(
+            "n8n request failed | chat_id=%s",
+            chat_id,
+        )
+        raise
 
 
 @app.get("/")
@@ -203,11 +222,15 @@ def database_stats(
         ).one()
 
         customer_count = session.scalar(
-            select(func.count(models.Customer.id))
+            select(
+                func.count(models.Customer.id)
+            )
         )
 
         message_count = session.scalar(
-            select(func.count(models.Message.id))
+            select(
+                func.count(models.Message.id)
+            )
         )
 
     return {
@@ -230,7 +253,9 @@ def initialize_database(
 
     try:
         Base.metadata.create_all(bind=engine)
-        logger.info("PostgreSQL tables initialized")
+        logger.info(
+            "PostgreSQL tables initialized"
+        )
 
         return {
             "status": "initialized",
@@ -260,7 +285,10 @@ async def setup_telegram_webhook(
             detail="Invalid admin key",
         )
 
-    webhook_url = payload.get("webhook_url", "")
+    webhook_url = payload.get(
+        "webhook_url",
+        "",
+    )
 
     if not webhook_url.startswith("https://"):
         raise HTTPException(
@@ -275,7 +303,9 @@ async def setup_telegram_webhook(
             status_code=(
                 status.HTTP_500_INTERNAL_SERVER_ERROR
             ),
-            detail="Telegram bot token is not configured",
+            detail=(
+                "Telegram bot token is not configured"
+            ),
         )
 
     telegram_url = (
@@ -334,7 +364,9 @@ async def telegram_webhook(
             status_code=(
                 status.HTTP_500_INTERNAL_SERVER_ERROR
             ),
-            detail="Webhook security is not configured",
+            detail=(
+                "Webhook security is not configured"
+            ),
         )
 
     if (
@@ -395,9 +427,9 @@ async def telegram_webhook(
         return {"status": "duplicate"}
 
     logger.info(
-        "Incoming Telegram message | update_id=%s | "
-        "chat_id=%s | user_id=%s | username=%s | "
-        "text=%s",
+        "Incoming Telegram message | "
+        "update_id=%s | chat_id=%s | "
+        "user_id=%s | username=%s | text=%s",
         update_id,
         chat_id,
         sender.get("id"),
@@ -405,20 +437,31 @@ async def telegram_webhook(
         message_text,
     )
 
+    conversation_history = get_recent_conversation(
+        chat_id=chat_id,
+        exclude_update_id=update_id,
+        limit=10,
+    )
+
     try:
         orchestration_result = (
             await call_n8n_orchestrator(
                 chat_id=chat_id,
                 sender=sender,
-                text=message_text,
+                message_text=message_text,
+                conversation_history=conversation_history,
             )
         )
 
         reply = orchestration_result.get("reply")
 
-        if not isinstance(reply, str) or not reply.strip():
+        if (
+            not isinstance(reply, str)
+            or not reply.strip()
+        ):
             raise ValueError(
-                "n8n response does not contain a valid reply"
+                "n8n response does not contain "
+                "a valid reply"
             )
 
     except (
@@ -427,19 +470,21 @@ async def telegram_webhook(
         RuntimeError,
     ):
         logger.exception(
-            "n8n orchestration failed | chat_id=%s",
+            "n8n orchestration failed | "
+            "chat_id=%s",
             chat_id,
         )
 
         reply = (
-            "Sorry, I could not process your request "
-            "right now. Please try again shortly."
+            "Sorry, I could not process your "
+            "request right now. "
+            "Please try again shortly."
         )
 
     try:
         sent_message = await send_telegram_message(
-            chat_id,
-            reply,
+            chat_id=chat_id,
+            message_text=reply,
         )
 
         save_outgoing_message(
@@ -453,7 +498,11 @@ async def telegram_webhook(
     except httpx.HTTPError:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Telegram message delivery failed",
+            detail=(
+                "Telegram message delivery failed"
+            ),
         )
 
-    return {"status": "processed"}
+    return {
+        "status": "processed",
+    }

@@ -136,3 +136,53 @@ def save_outgoing_message(
             customer.id,
             message_count,
         )
+
+def get_recent_conversation(
+    chat_id: int,
+    exclude_update_id: int | None = None,
+    limit: int = 10,
+) -> list[dict[str, str]]:
+    with SessionLocal() as session:
+        customer = session.scalar(
+            select(Customer).where(
+                Customer.telegram_chat_id == chat_id
+            )
+        )
+
+        if customer is None:
+            return []
+
+        query = select(Message).where(
+            Message.customer_id == customer.id
+        )
+
+        if exclude_update_id is not None:
+            query = query.where(
+                (
+                    Message.telegram_update_id.is_(None)
+                )
+                | (
+                    Message.telegram_update_id
+                    != exclude_update_id
+                )
+            )
+
+        messages = session.scalars(
+            query.order_by(
+                Message.created_at.desc()
+            ).limit(limit)
+        ).all()
+
+        messages.reverse()
+
+        return [
+            {
+                "role": (
+                    "user"
+                    if message.direction == "incoming"
+                    else "assistant"
+                ),
+                "content": message.content,
+            }
+            for message in messages
+        ]
