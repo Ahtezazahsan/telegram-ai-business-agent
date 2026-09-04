@@ -5,10 +5,9 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, status
-
-from app import models  # noqa: F401
 from sqlalchemy import func, select, text
 
+from app import models  # noqa: F401
 from app.database import Base, SessionLocal, engine
 from app.repositories import (
     save_incoming_message,
@@ -17,26 +16,54 @@ from app.repositories import (
 
 load_dotenv()
 
-APP_NAME = os.getenv("APP_NAME", "Telegram AI Business Agent")
+APP_NAME = os.getenv(
+    "APP_NAME",
+    "Telegram AI Business Agent",
+)
 APP_ENV = os.getenv("APP_ENV", "development")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
+
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    "",
+)
+TELEGRAM_WEBHOOK_SECRET = os.getenv(
+    "TELEGRAM_WEBHOOK_SECRET",
+    "",
+)
 TELEGRAM_SEND_ENABLED = (
-    os.getenv("TELEGRAM_SEND_ENABLED", "false").lower() == "true"
+    os.getenv("TELEGRAM_SEND_ENABLED", "false").lower()
+    == "true"
+)
+
+N8N_ORCHESTRATION_URL = os.getenv(
+    "N8N_ORCHESTRATION_URL",
+    "",
+)
+N8N_INTERNAL_API_KEY = os.getenv(
+    "N8N_INTERNAL_API_KEY",
+    "",
 )
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    format=(
+        "%(asctime)s | %(levelname)s | "
+        "%(name)s | %(message)s"
+    ),
 )
 
 logger = logging.getLogger(APP_NAME)
+
+# Prevent tokens and sensitive request URLs appearing in logs.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 app = FastAPI(
     title=APP_NAME,
-    description="AI-powered Telegram customer support and sales platform",
+    description=(
+        "AI-powered Telegram customer support "
+        "and sales platform"
+    ),
     version="1.0.0",
 )
 
@@ -53,10 +80,12 @@ async def send_telegram_message(
         return {}
 
     if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN is not configured"
+        )
 
     url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
@@ -66,12 +95,21 @@ async def send_telegram_message(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(url, json=payload)
+        async with httpx.AsyncClient(
+            timeout=15.0
+        ) as client:
+            response = await client.post(
+                url,
+                json=payload,
+            )
             response.raise_for_status()
             result = response.json()
 
-        logger.info("Telegram reply sent | chat_id=%s", chat_id)
+        logger.info(
+            "Telegram reply sent | chat_id=%s",
+            chat_id,
+        )
+
         return result.get("result", {})
 
     except httpx.HTTPError:
@@ -80,6 +118,54 @@ async def send_telegram_message(
             chat_id,
         )
         raise
+
+
+async def call_n8n_orchestrator(
+    chat_id: int,
+    sender: dict[str, Any],
+    text: str,
+) -> dict[str, Any]:
+    if not N8N_ORCHESTRATION_URL:
+        raise RuntimeError(
+            "N8N_ORCHESTRATION_URL is not configured"
+        )
+
+    if not N8N_INTERNAL_API_KEY:
+        raise RuntimeError(
+            "N8N_INTERNAL_API_KEY is not configured"
+        )
+
+    payload = {
+        "telegram_user_id": sender.get("id"),
+        "chat_id": chat_id,
+        "username": sender.get("username"),
+        "first_name": sender.get("first_name"),
+        "message": text,
+    }
+
+    headers = {
+        "X-Internal-API-Key": N8N_INTERNAL_API_KEY,
+    }
+
+    async with httpx.AsyncClient(
+        timeout=30.0
+    ) as client:
+        response = await client.post(
+            N8N_ORCHESTRATION_URL,
+            json=payload,
+            headers=headers,
+        )
+        response.raise_for_status()
+        result = response.json()
+
+    logger.info(
+        "n8n orchestration completed | "
+        "chat_id=%s | intent=%s",
+        chat_id,
+        result.get("intent"),
+    )
+
+    return result
 
 
 @app.get("/")
@@ -111,7 +197,8 @@ def database_stats(
     with SessionLocal() as session:
         database_info = session.execute(
             text(
-                "SELECT current_database(), current_schema()"
+                "SELECT current_database(), "
+                "current_schema()"
             )
         ).one()
 
@@ -129,6 +216,8 @@ def database_stats(
         "customers": customer_count or 0,
         "messages": message_count or 0,
     }
+
+
 @app.post("/admin/database/init")
 def initialize_database(
     x_admin_key: str | None = Header(default=None),
@@ -149,11 +238,16 @@ def initialize_database(
         }
 
     except Exception:
-        logger.exception("PostgreSQL initialization failed")
+        logger.exception(
+            "PostgreSQL initialization failed"
+        )
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=(
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
             detail="Database initialization failed",
         )
+
 
 @app.post("/admin/telegram/setup-webhook")
 async def setup_telegram_webhook(
@@ -171,11 +265,21 @@ async def setup_telegram_webhook(
     if not webhook_url.startswith("https://"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="A valid HTTPS webhook URL is required",
+            detail=(
+                "A valid HTTPS webhook URL is required"
+            ),
+        )
+
+    if not TELEGRAM_BOT_TOKEN:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
+            detail="Telegram bot token is not configured",
         )
 
     telegram_url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/setWebhook"
     )
 
@@ -187,7 +291,9 @@ async def setup_telegram_webhook(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(
+            timeout=20.0
+        ) as client:
             response = await client.post(
                 telegram_url,
                 json=telegram_payload,
@@ -195,19 +301,24 @@ async def setup_telegram_webhook(
             response.raise_for_status()
 
         result = response.json()
+
         logger.info(
             "Telegram webhook configured | url=%s",
             webhook_url,
         )
+
         return result
 
     except httpx.HTTPError:
-        logger.exception("Telegram webhook setup failed")
+        logger.exception(
+            "Telegram webhook setup failed"
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Telegram webhook setup failed",
         )
-    
+
+
 @app.post("/webhooks/telegram")
 async def telegram_webhook(
     update: dict[str, Any],
@@ -216,9 +327,13 @@ async def telegram_webhook(
     ),
 ) -> dict[str, str]:
     if not TELEGRAM_WEBHOOK_SECRET:
-        logger.error("TELEGRAM_WEBHOOK_SECRET is not configured")
+        logger.error(
+            "TELEGRAM_WEBHOOK_SECRET is not configured"
+        )
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=(
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
             detail="Webhook security is not configured",
         )
 
@@ -226,7 +341,9 @@ async def telegram_webhook(
         x_telegram_bot_api_secret_token
         != TELEGRAM_WEBHOOK_SECRET
     ):
-        logger.warning("Rejected unauthorized Telegram webhook")
+        logger.warning(
+            "Rejected unauthorized Telegram webhook"
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid webhook secret",
@@ -243,13 +360,15 @@ async def telegram_webhook(
 
     chat = message.get("chat", {})
     sender = message.get("from", {})
+
     chat_id = chat.get("id")
-    text = message.get("text")
+    message_text = message.get("text")
 
-    if chat_id is None or not text:
-        logger.info("Non-text Telegram message ignored")
+    if chat_id is None or not message_text:
+        logger.info(
+            "Non-text Telegram message ignored"
+        )
         return {"status": "ignored"}
-
 
     update_id = update.get("update_id")
 
@@ -264,39 +383,73 @@ async def telegram_webhook(
         message=message,
         sender=sender,
         chat_id=chat_id,
-        text=text,
+        text=message_text,
     )
 
     if not is_new_message:
         logger.info(
-            "Duplicate Telegram update ignored | update_id=%s",
+            "Duplicate Telegram update ignored | "
+            "update_id=%s",
             update_id,
         )
-        return {"status": "duplicate"}    
+        return {"status": "duplicate"}
 
     logger.info(
         "Incoming Telegram message | update_id=%s | "
-        "chat_id=%s | user_id=%s | username=%s | text=%s",
-        update.get("update_id"),
+        "chat_id=%s | user_id=%s | username=%s | "
+        "text=%s",
+        update_id,
         chat_id,
         sender.get("id"),
         sender.get("username"),
-        text,
-    )
-
-    reply = (
-        f"Hello {sender.get('first_name', 'there')}! "
-        f"I received your message: {text}"
+        message_text,
     )
 
     try:
-        sent_message = await send_telegram_message(chat_id, reply)
+        orchestration_result = (
+            await call_n8n_orchestrator(
+                chat_id=chat_id,
+                sender=sender,
+                text=message_text,
+            )
+        )
+
+        reply = orchestration_result.get("reply")
+
+        if not isinstance(reply, str) or not reply.strip():
+            raise ValueError(
+                "n8n response does not contain a valid reply"
+            )
+
+    except (
+        httpx.HTTPError,
+        ValueError,
+        RuntimeError,
+    ):
+        logger.exception(
+            "n8n orchestration failed | chat_id=%s",
+            chat_id,
+        )
+
+        reply = (
+            "Sorry, I could not process your request "
+            "right now. Please try again shortly."
+        )
+
+    try:
+        sent_message = await send_telegram_message(
+            chat_id,
+            reply,
+        )
 
         save_outgoing_message(
             chat_id=chat_id,
             text=reply,
-            telegram_message_id=sent_message.get("message_id"),
+            telegram_message_id=sent_message.get(
+                "message_id"
+            ),
         )
+
     except httpx.HTTPError:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
